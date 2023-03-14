@@ -1,0 +1,5 @@
+openzeppelin-cairo-contracts==0.6.1
+starknet-devnet==0.4.6
+starknet.py==0.14.0a0
+pytest
+pytest-asyncio
