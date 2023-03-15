@@ -29,6 +29,18 @@ func counter_id() -> (token_id: Uint256) {
 func max_supply() -> (supply: Uint256) {
 }
 
+@storage_var
+func contract_uri(index: felt) -> (contractURI: felt) {
+}
+
+@storage_var
+func contract_uri_len() -> (contractURI_len: felt) {
+}
+
+@storage_var
+func royalty_amount() -> (amount: Uint256) {
+}
+
 @external
 func initializer{
     syscall_ptr: felt*,
@@ -43,6 +55,7 @@ func initializer{
     token_uri_suffix: felt,
     supply: Uint256,
     proxy_admin: felt,
+    royalty: Uint256
 ) {
     ERC721.initializer(name, symbol);
     ERC721_Metadata_initializer();
@@ -53,25 +66,8 @@ func initializer{
     ERC721_Metadata_setBaseTokenURI(base_token_uri_len, base_token_uri, token_uri_suffix);
 
     max_supply.write(supply);
+    royalty_amount.write(royalty);
     counter_id.write(Uint256(1, 0));
-    return ();
-}
-
-@external
-func upgrade{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
-    range_check_ptr
-}(new_implementation: felt) -> () {
-    Proxy.assert_only_admin();
-    Proxy._set_implementation_hash(new_implementation);
-    return ();
-}
-
-@external
-func setAdmin{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(new_admin: felt) {
-    Proxy.assert_only_admin();
-    Proxy._set_admin(new_admin);
     return ();
 }
 
@@ -80,13 +76,37 @@ func setAdmin{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(n
 //
 
 @view
+func contractURI{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
+    range_check_ptr
+}() -> (contractURI_len: felt, contractURI: felt*) { 
+    alloc_locals;
+    let (local base_contract_uri) = alloc();
+    let (local contractURI_len) = contract_uri_len.read();
+    _contractURI(contractURI_len, base_contract_uri);
+    return (contractURI_len=contractURI_len, contractURI=base_contract_uri);
+}
+
+@view
+func royaltyInfo{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
+    range_check_ptr
+}(tokenId: Uint256, salePrice: Uint256) -> (
+    receiver: felt, royalty_amount: Uint256
+) {
+    let (admin_address) = getAdmin();
+    let (royalty: Uint256) = royalty_amount.read();
+    return (admin_address, royalty);
+}
+
+@view
 func getImplementationHash{
     syscall_ptr: felt*, 
     pedersen_ptr: HashBuiltin*, 
     range_check_ptr
-}() -> (
-    implementation: felt
-) {
+}() -> (implementation: felt) {
     return Proxy.get_implementation_hash();
 }
 
@@ -230,8 +250,8 @@ func mint{
     let (max_supply: Uint256) = maxSupply();
 
     with_attr error_message("No Mystis OG Pass left.") {
-        let (is_le) = uint256_le(total_minted_og_pass, max_supply);
-        assert is_le = 1;
+        let (is_lt) = uint256_lt(total_minted_og_pass, max_supply);
+        assert is_lt = 1;
     }
 
     let (user_balance: Uint256) = balanceOf(caller_address);
@@ -250,13 +270,25 @@ func mint{
 }
 
 @external
+func setContractURI{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(contractURI_len: felt, contractURI: felt*) {
+    Proxy.assert_only_admin();
+    ReentrancyGuard.start();
+    _setContractURI(contractURI_len, contractURI);
+    contract_uri_len.write(contractURI_len);
+    ReentrancyGuard.end();
+    return ();
+}
+
+@external
 func setMaxSupply{
     syscall_ptr: felt*, 
     pedersen_ptr: HashBuiltin*, 
     range_check_ptr
-}(
-    supply: Uint256
-) {
+}(supply: Uint256) {
     Ownable.assert_only_owner();
     ReentrancyGuard.start();
     max_supply.write(supply);
@@ -283,9 +315,7 @@ func setTokenURI{
     syscall_ptr: felt*, 
     pedersen_ptr: HashBuiltin*, 
     range_check_ptr
-}(
-    base_token_uri_len: felt, base_token_uri: felt*, token_uri_suffix: felt
-) {
+}(base_token_uri_len: felt, base_token_uri: felt*, token_uri_suffix: felt) {
     Ownable.assert_only_owner();
     ERC721_Metadata_setBaseTokenURI(base_token_uri_len, base_token_uri, token_uri_suffix);
     return ();
@@ -382,5 +412,50 @@ func unpause{
 }() {
     Ownable.assert_only_owner();
     Pausable._unpause();
+    return ();
+}
+
+@external
+func upgrade{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(new_implementation: felt) -> () {
+    Proxy.assert_only_admin();
+    Proxy._set_implementation_hash(new_implementation);
+    return ();
+}
+
+@external
+func setAdmin{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(new_admin: felt) {
+    Proxy.assert_only_admin();
+    Proxy._set_admin(new_admin);
+    return ();
+}
+
+func _setContractURI{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
+    range_check_ptr
+}(contractURI_len: felt, contractURI: felt*) {
+    if (contractURI_len == 0) {
+        return ();
+    }
+    contract_uri.write(index=contractURI_len, value=[contractURI]);
+    _setContractURI(contractURI_len=contractURI_len - 1, contractURI=contractURI + 1);
+    return ();
+}
+
+func _contractURI{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
+    range_check_ptr
+}(base_contract_uri_len: felt, base_contract_uri: felt*) {
+    if (base_contract_uri_len == 0) {
+        return ();
+    }
+    let (base) = contract_uri.read(base_contract_uri_len);
+    assert [base_contract_uri] = base;
+    _contractURI(base_contract_uri_len=base_contract_uri_len - 1, base_contract_uri=base_contract_uri + 1);
     return ();
 }
