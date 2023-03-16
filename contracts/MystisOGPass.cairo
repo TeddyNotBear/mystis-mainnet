@@ -4,8 +4,9 @@
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin
 from starkware.starknet.common.syscalls import get_caller_address 
-from starkware.cairo.common.uint256 import Uint256, uint256_add, uint256_sub, uint256_lt, uint256_eq, uint256_le
+from starkware.cairo.common.uint256 import Uint256, uint256_add, uint256_lt
 from starkware.cairo.common.alloc import alloc
+from starkware.cairo.common.bool import TRUE, FALSE
 
 from openzeppelin.security.pausable.library import Pausable
 from openzeppelin.access.ownable.library import Ownable
@@ -15,6 +16,7 @@ from openzeppelin.token.erc721.library import ERC721
 from openzeppelin.token.erc721.enumerable.library import ERC721Enumerable
 from openzeppelin.introspection.erc165.library import ERC165
 
+from contracts.token.erc2981.unidirectional_mutable import ERC2981_UniDirectional_Mutable
 from contracts.token.ERC721.ERC721_Metadata_base import (
     ERC721_Metadata_initializer,
     ERC721_Metadata_tokenURI,
@@ -37,10 +39,6 @@ func contract_uri(index: felt) -> (contractURI: felt) {
 func contract_uri_len() -> (contractURI_len: felt) {
 }
 
-@storage_var
-func royalty_amount() -> (amount: Uint256) {
-}
-
 @external
 func initializer{
     syscall_ptr: felt*,
@@ -54,19 +52,16 @@ func initializer{
     base_token_uri: felt*,
     token_uri_suffix: felt,
     supply: Uint256,
-    proxy_admin: felt,
-    royalty: Uint256
+    fee_basis_points: felt
 ) {
     ERC721.initializer(name, symbol);
     ERC721_Metadata_initializer();
     ERC721Enumerable.initializer();
     Ownable.initializer(owner);
-    Proxy.initializer(proxy_admin);
-
+    Proxy.initializer(owner);
+    ERC2981_UniDirectional_Mutable.initializer(owner, fee_basis_points);
     ERC721_Metadata_setBaseTokenURI(base_token_uri_len, base_token_uri, token_uri_suffix);
-
     max_supply.write(supply);
-    royalty_amount.write(royalty);
     counter_id.write(Uint256(1, 0));
     return ();
 }
@@ -94,29 +89,26 @@ func royaltyInfo{
     pedersen_ptr: HashBuiltin*, 
     range_check_ptr
 }(tokenId: Uint256, salePrice: Uint256) -> (
-    receiver: felt, royalty_amount: Uint256
+    receiver: felt, royaltyAmount: Uint256
 ) {
-    let (admin_address) = getAdmin();
-    let (royalty: Uint256) = royalty_amount.read();
-    return (admin_address, royalty);
+    let exists = ERC721._exists(tokenId);
+    with_attr error_message("ERC721: token id does not exist") {
+        assert exists = TRUE;
+    }
+    let (receiver: felt, royaltyAmount: Uint256) = ERC2981_UniDirectional_Mutable.royalty_info(
+        tokenId, salePrice
+    );
+    return (receiver, royaltyAmount);
 }
 
 @view
-func getImplementationHash{
-    syscall_ptr: felt*, 
-    pedersen_ptr: HashBuiltin*, 
+func tokenURI{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
     range_check_ptr
-}() -> (implementation: felt) {
-    return Proxy.get_implementation_hash();
-}
-
-@view
-func getAdmin{
-    syscall_ptr: felt*, 
-    pedersen_ptr: HashBuiltin*, 
-    range_check_ptr
-}() -> (admin: felt) {
-    return Proxy.get_admin();
+}(token_id: Uint256) -> (token_uri_len: felt, token_uri: felt*) {
+    let (token_uri_len, token_uri) = ERC721_Metadata_tokenURI(token_id);
+    return (token_uri_len, token_uri);
 }
 
 @view
@@ -140,22 +132,21 @@ func totalMintedOGPass{
 }
 
 @view
-func tokenURI{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
+func getImplementationHash{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
     range_check_ptr
-}(token_id: Uint256) -> (token_uri_len: felt, token_uri: felt*) {
-    let (token_uri_len, token_uri) = ERC721_Metadata_tokenURI(token_id);
-    return (token_uri_len, token_uri);
+}() -> (implementation: felt) {
+    return Proxy.get_implementation_hash();
 }
 
 @view
-func supportsInterface{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
+func getAdmin{
+    syscall_ptr: felt*, 
+    pedersen_ptr: HashBuiltin*, 
     range_check_ptr
-}(interfaceId: felt) -> (success: felt) {
-    return ERC165.supports_interface(interfaceId);
+}() -> (admin: felt) {
+    return Proxy.get_admin();
 }
 
 @view
@@ -231,6 +222,15 @@ func owner{
     return Ownable.owner();
 }
 
+@view
+func supportsInterface{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(interfaceId: felt) -> (success: felt) {
+    return ERC165.supports_interface(interfaceId);
+}
+
 //
 // Externals
 //
@@ -259,7 +259,6 @@ func mint{
         let (is_lt) = uint256_lt(user_balance, Uint256(1, 0));
         assert is_lt = 1;
     }
-
     let (token_id: Uint256) = counter_id.read();
     ERC721Enumerable._mint(caller_address, token_id);
     let (res, _) = uint256_add(token_id, Uint256(1, 0));
@@ -275,7 +274,7 @@ func setContractURI{
     pedersen_ptr: HashBuiltin*,
     range_check_ptr
 }(contractURI_len: felt, contractURI: felt*) {
-    Proxy.assert_only_admin();
+    Ownable.assert_only_owner();
     ReentrancyGuard.start();
     _setContractURI(contractURI_len, contractURI);
     contract_uri_len.write(contractURI_len);
@@ -292,20 +291,6 @@ func setMaxSupply{
     Ownable.assert_only_owner();
     ReentrancyGuard.start();
     max_supply.write(supply);
-    ReentrancyGuard.end();
-    return ();
-}
-
-@external
-func burn{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
-    range_check_ptr
-}(tokenId: Uint256) {
-    ReentrancyGuard.start();
-    Pausable.assert_not_paused();
-    ERC721.assert_only_token_owner(tokenId);
-    ERC721Enumerable._burn(tokenId);
     ReentrancyGuard.end();
     return ();
 }
@@ -374,26 +359,6 @@ func safeTransferFrom{
 }
 
 @external
-func transferOwnership{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
-    range_check_ptr
-}(newOwner: felt) {
-    Ownable.transfer_ownership(newOwner);
-    return ();
-}
-
-@external
-func renounceOwnership{
-    syscall_ptr: felt*,
-    pedersen_ptr: HashBuiltin*,
-    range_check_ptr
-}() {
-    Ownable.renounce_ownership();
-    return ();
-}
-
-@external
 func pause{
     syscall_ptr: felt*,
     pedersen_ptr: HashBuiltin*,
@@ -427,9 +392,22 @@ func upgrade{
 }
 
 @external
-func setAdmin{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(new_admin: felt) {
-    Proxy.assert_only_admin();
-    Proxy._set_admin(new_admin);
+func transferOwnership{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(newOwner: felt) {
+    Ownable.transfer_ownership(newOwner);
+    return ();
+}
+
+@external
+func renounceOwnership{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() {
+    Ownable.renounce_ownership();
     return ();
 }
 
